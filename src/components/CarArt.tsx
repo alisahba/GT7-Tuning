@@ -2,7 +2,8 @@ import type { Car } from '../types';
 
 // Generated side-profile illustration, used while a photo loads or when none exists.
 
-const PALETTE = ['#2f7bff', '#ff3b30', '#ffc940', '#21d07a', '#b46bff', '#ff8a1f', '#22c6e0', '#e8edf5', '#ff5fa2'];
+// Muted automotive paint colours.
+const PALETTE = ['#2f4858', '#8c4a3b', '#4b5d45', '#5d5470', '#9a7b4f', '#3e5c76', '#6f6a63', '#4f6b62', '#a35d3a', '#1f2a36'];
 
 function hash(s: string) {
   let h = 2166136261;
@@ -65,23 +66,20 @@ export function CarArt({ car }: { car: Car }) {
       <defs>
         <linearGradient id={`${id}b`} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor={color} stopOpacity="0.95" />
-          <stop offset="1" stopColor={color} stopOpacity="0.45" />
+          <stop offset="1" stopColor={color} stopOpacity="0.72" />
         </linearGradient>
         <radialGradient id={`${id}s`} cx="0.5" cy="0.5" r="0.5">
-          <stop offset="0" stopColor="#000" stopOpacity="0.55" />
+          <stop offset="0" stopColor="#000" stopOpacity="0.28" />
           <stop offset="1" stopColor="#000" stopOpacity="0" />
         </radialGradient>
       </defs>
-      <text x="160" y="58" textAnchor="middle" className="car-art-maker">
-        {car.maker.toUpperCase()}
-      </text>
       <ellipse cx="160" cy="118" rx="150" ry="10" fill={`url(#${id}s)`} />
       <path d={shape.body} fill={`url(#${id}b)`} />
-      <path d={shape.glass} fill="#0b0f16" opacity="0.85" />
+      <path d={shape.glass} fill="#1b2026" opacity="0.8" />
       {[w1, w2].map((x) => (
         <g key={x}>
-          <circle cx={x} cy={104} r={wr} fill="#0b0f16" />
-          <circle cx={x} cy={104} r={wr * 0.55} fill="none" stroke="#9aa6b8" strokeWidth="3" />
+          <circle cx={x} cy={104} r={wr} fill="#16191d" />
+          <circle cx={x} cy={104} r={wr * 0.55} fill="none" stroke="#8a8f96" strokeWidth="3" />
         </g>
       ))}
     </svg>

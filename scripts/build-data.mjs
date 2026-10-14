@@ -2,7 +2,8 @@
 // the raw sources in data/. Run with `npm run data` after changing a source.
 //
 // Sources:
-//   data/source/gt7info/*.csv              – car / maker list (ddm999/gt7info, MIT-0)
+//   data/source/gt7info/*.csv              – car / maker list, official car groups and
+//                                            stock PP per tyre (ddm999/gt7info, MIT-0)
 //   data/car-specs.csv                     – drivetrain, power, weight, balance (this project)
 //   data/source/gt7-track-data/catalog.json    – official layout list + stats
 //   data/source/gt7-track-data/signatures.json – in-game racing line per layout
@@ -57,25 +58,72 @@ function yearOf(name) {
   return yy > 26 ? 1900 + yy : 2000 + yy;
 }
 
+// Official GT7 groups (N, 1, 2, 3, 4, B, X). Cars missing from the list fall
+// back to the tuning class in car-specs.csv.
+const groups = Object.fromEntries(readCsv('source', 'gt7info', 'cargrp.csv').map((g) => [g.ID, g.Group]));
+const GROUP_CAT = { 1: 'gr1', 2: 'gr2', 3: 'gr3', 4: 'gr4', B: 'grb' };
+const CAT_GROUP = { road: 'N', gr1: '1', gr2: '2', gr3: '3', gr4: '4', grb: 'B', race: 'X', formula: 'X', kart: 'X' };
+
+// Stock Performance Points per tyre compound, as measured in game.
+const stockPP = {};
+for (const r of readCsv('source', 'gt7info', 'stockperf.csv')) (stockPP[r.ID] ??= {})[r.Tyre] = Math.round(Number(r.PP));
+
 const cars = readCsv('source', 'gt7info', 'cars.csv').map((c) => {
   const s = specs[c.ID];
   if (!s) throw new Error(`car ${c.ID} (${c.ShortName}) has no row in data/car-specs.csv`);
   const maker = makers[c.Maker] ?? { name: 'Unknown', country: 'pdi' };
+  const group = groups[c.ID] ?? CAT_GROUP[s.cat];
   return {
     id: Number(c.ID),
     name: c.ShortName,
     maker: maker.name,
     country: maker.country,
     year: yearOf(c.ShortName),
-    cat: s.cat,
+    group,
+    cat: GROUP_CAT[group] ?? s.cat,
     dt: s.dt,
     asp: s.asp,
     hp: Number(s.hp),
     kg: Number(s.kg),
     front: Number(s.front),
+    ...(stockPP[c.ID] ? { pp: stockPP[c.ID] } : {}),
   };
 });
 cars.sort((a, b) => a.maker.localeCompare(b.maker) || a.name.localeCompare(b.name));
+
+/* -------------------------------------------------------------- PP model */
+// ln(PP on Sports Medium) = a + b·ln(hp) + c·ln(kg), fitted on every car with a
+// measured PP, then scaled per group. Tyre compounds are median ratios to SM.
+
+const median = (xs) => { const v = xs.slice().sort((x, y) => x - y); return v.length ? v[Math.floor(v.length / 2)] : 1; };
+function solve3(A, B) {
+  const M = A.map((row, i) => [...row, B[i]]);
+  for (let i = 0; i < 3; i++) {
+    const p = M[i][i];
+    for (let j = i; j < 4; j++) M[i][j] /= p;
+    for (let k = 0; k < 3; k++) if (k !== i) { const f = M[k][i]; for (let j = i; j < 4; j++) M[k][j] -= f * M[i][j]; }
+  }
+  return M.map((r) => r[3]);
+}
+const fitCars = cars.filter((c) => c.pp?.SM);
+const X = fitCars.map((c) => [1, Math.log(c.hp), Math.log(c.kg)]);
+const Y = fitCars.map((c) => Math.log(c.pp.SM));
+const [a, b, cc] = solve3(
+  [0, 1, 2].map((i) => [0, 1, 2].map((j) => X.reduce((s, x) => s + x[i] * x[j], 0))),
+  [0, 1, 2].map((i) => X.reduce((s, x, k) => s + x[i] * Y[k], 0)),
+);
+const predict = (c) => Math.exp(a + b * Math.log(c.hp) + cc * Math.log(c.kg));
+const groupFactor = {};
+for (const g of ['N', '1', '2', '3', '4', 'B', 'X']) {
+  const rs = fitCars.filter((c) => c.group === g).map((c) => c.pp.SM / predict(c));
+  groupFactor[g] = rs.length >= 3 ? Number(median(rs).toFixed(3)) : 1;
+}
+const tyreRatio = {};
+for (const t of ['CH', 'CM', 'CS', 'SH', 'SM', 'SS', 'RH', 'RM', 'RS', 'IM', 'W', 'D', 'S']) {
+  tyreRatio[t] = Number(median(fitCars.filter((c) => c.pp[t]).map((c) => c.pp[t] / c.pp.SM)).toFixed(3));
+}
+const ppModel = { a: Number(a.toFixed(4)), b: Number(b.toFixed(4)), c: Number(cc.toFixed(4)), groupFactor, tyreRatio };
+const errs = fitCars.map((c) => Math.abs(predict(c) * groupFactor[c.group] - c.pp.SM));
 
 /* ---------------------------------------------------------------- tracks */
 
@@ -132,6 +180,13 @@ function toMap(path, reversed) {
 // Layouts without their own recording borrow the closest one at the venue.
 const FALLBACK = { '8dd16b': '12ceac', '592211': '31acde', '9ec2c6': '2066d9' };
 
+// World Circuits regions as named in the game's world map.
+const REGION = {
+  fr: 'Europe', it: 'Europe', gb: 'Europe', es: 'Europe', be: 'Europe', de: 'Europe', at: 'Europe', hr: 'Europe', ch: 'Europe',
+  us: 'America', ca: 'America', br: 'America',
+  jp: 'Asia-Oceania', au: 'Asia-Oceania', ae: 'Asia-Oceania',
+};
+
 const surfaceOf = (roadway) =>
   roadway === 'Dirt' ? 'dirt' : roadway === 'Snow' ? 'snow' : roadway === 'Tarmac & Dirt' ? 'mixed' : 'tarmac';
 
@@ -144,6 +199,7 @@ for (const venue of catalog.tracks) {
       venueId: venue.official_track_id,
       country: ISO[venue.country] ?? 'xx',
       countryName: venue.country_name || venue.country,
+      region: REGION[ISO[venue.country]] ?? 'Europe',
       turns: l.turns,
       length: l.length_m,
       elevation: l.elevation_m ?? 0,
@@ -166,4 +222,6 @@ for (const venue of catalog.tracks) {
 mkdirSync(out(), { recursive: true });
 writeFileSync(out('cars.json'), JSON.stringify(cars));
 writeFileSync(out('tracks.json'), JSON.stringify(tracks));
-console.log(`cars: ${cars.length}  tracks: ${tracks.length} (${tracks.filter((t) => !t.mapExact).length} using venue map, ${tracks.filter((t) => !t.map).length} without map)`);
+writeFileSync(out('pp-model.json'), JSON.stringify(ppModel, null, 1));
+console.log(`PP model: ${fitCars.length} measured cars, median error ${median(errs).toFixed(1)} PP`);
+console.log(`cars: ${cars.length} (${fitCars.length} with stock PP)  tracks: ${tracks.length} (${tracks.filter((t) => !t.mapExact).length} using venue map, ${tracks.filter((t) => !t.map).length} without map)`);

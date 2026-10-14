@@ -1,4 +1,7 @@
-import type { Car, CarCategory, Drivetrain, RaceOptions, Track } from '../types';
+import type { Car, CarCategory, Drivetrain, RaceOptions, Track, TyreCode } from '../types';
+import { ballastPosition, estimatePP, planPP, type PPEstimate, type PPPlan } from './pp';
+import { planStrategy, type Strategy } from './strategy';
+import { TYRE_NAME } from './tyres';
 
 /* --------------------------------------------------------------------------
  * GT7 tuning calculator.
@@ -25,8 +28,25 @@ export interface TrackProfile {
 
 export interface Setup {
   profile: TrackProfile;
-  tyreFront: string;
-  tyreRear: string;
+  tyreFront: TyreCode;
+  tyreRear: TyreCode;
+  /** Estimated PP on `ppTyre` before any restrictor/ballast/tyre change. */
+  ppEstimate: PPEstimate;
+  ppTyre: TyreCode;
+  /** Present when the event has a PP limit. */
+  ppPlan: PPPlan | null;
+  /** Power restrictor % and ballast kg applied to meet the PP limit. */
+  restrictor: number;
+  ballast: number;
+  /** GT7 ballast position, −50 (front) … +50 (rear). */
+  ballastPos: number;
+  /** Power and weight after restrictor/ballast. */
+  effHp: number;
+  effKg: number;
+  /** Balance of Performance — car settings locked by the event. */
+  locked: boolean;
+  strategy: Strategy | null;
+  parts: { name: string; why: string }[];
   rideHeight: Pair;
   arb: Pair;
   compression: Pair;
@@ -199,26 +219,55 @@ export function computeSetup(car: Car, track: Track, race: RaceOptions): Setup {
   const drift = race.type === 'drift';
   const drag = race.type === 'drag';
   const endurance = race.type === 'endurance';
-  const hpPerTon = (race.hp / race.kg) * 1000;
   const dt = car.dt;
+  const ev = race.event ?? {};
+  const locked = !!ev.bop;
+  const slickClass = base.slicks;
 
   /* ---------- tyres */
-  let tyreFront: string, tyreRear: string;
-  if (track.surface === 'snow') tyreFront = tyreRear = 'Snow';
-  else if (track.surface === 'dirt' || track.surface === 'mixed') tyreFront = tyreRear = 'Dirt';
+  let tyreFront: TyreCode, tyreRear: TyreCode;
+  const roughPw = (race.hp / race.kg) * 1000;
+  if (ev.tyre) tyreFront = tyreRear = ev.tyre;
+  else if (track.surface === 'snow') tyreFront = tyreRear = 'S';
+  else if (track.surface === 'dirt' || track.surface === 'mixed') tyreFront = tyreRear = 'D';
   else if (wet) {
-    tyreFront = tyreRear = 'Intermediate';
+    tyreFront = tyreRear = 'IM';
     notes.push({ area: 'Tyres', text: 'Intermediates for a damp or drying track; switch to Heavy Wet once water is standing on the racing line.' });
-  }
-  else if (drift) {
-    tyreFront = hpPerTon > 330 ? 'Sports Soft' : 'Sports Medium';
-    tyreRear = hpPerTon > 330 ? 'Sports Medium' : 'Sports Hard';
-  } else if (drag) tyreFront = tyreRear = base.slicks ? 'Racing Soft' : 'Sports Soft';
+  } else if (drift) {
+    tyreFront = roughPw > 330 ? 'SS' : 'SM';
+    tyreRear = roughPw > 330 ? 'SM' : 'SH';
+  } else if (drag) tyreFront = tyreRear = slickClass ? 'RS' : 'SS';
   else {
-    const family = base.slicks ? 'Racing' : 'Sports';
-    const compound = race.type === 'time-trial' ? 'Soft' : endurance ? 'Hard' : 'Medium';
-    tyreFront = tyreRear = `${family} ${compound}`;
+    const family = slickClass ? 'R' : 'S';
+    const compound = race.type === 'time-trial' ? 'S' : endurance ? 'H' : 'M';
+    tyreFront = tyreRear = `${family}${compound}` as TyreCode;
   }
+  if (ev.tyre) notes.push({ area: 'Tyres', text: `The event requires ${TYRE_NAME[ev.tyre]} — the setup is tuned around that compound.` });
+
+  /* ---------- PP limit */
+  const ppTyre = tyreRear;
+  const ppEstimate: PPEstimate = ev.currentPP
+    ? { value: ev.currentPP, source: 'user' }
+    : estimatePP(car, race.hp, race.kg, tyreRear);
+  let ppPlan: PPPlan | null = null;
+  let restrictor = 100;
+  let ballast = 0;
+  if (ev.ppLimit && !locked) {
+    ppPlan = planPP({
+      current: ppEstimate.value, source: ppEstimate.source, limit: ev.ppLimit, hp: race.hp, kg: race.kg,
+      tyre: tyreRear, fixedTyre: !!ev.tyre, technical: profile.downforce >= 0.45,
+    });
+    restrictor = ppPlan.restrictor;
+    ballast = ppPlan.ballast;
+    if (ppPlan.tyre) {
+      notes.push({ area: 'Tyres', text: `Dropping from ${TYRE_NAME[tyreRear]} to ${TYRE_NAME[ppPlan.tyre]} is part of fitting under the PP limit.` });
+      tyreFront = tyreRear = ppPlan.tyre;
+    }
+  }
+  const effHp = Math.round(race.hp * (restrictor / 100));
+  const effKg = race.kg + ballast;
+  const hpPerTon = (effHp / effKg) * 1000;
+  const ballastPos = ballast > 0 ? ballastPosition(car.front) : 0;
 
   /* ---------- natural frequency (Hz) */
   let hz = base.hz;
@@ -363,10 +412,10 @@ export function computeSetup(car: Car, track: Track, race: RaceOptions): Setup {
 
   /* ---------- transmission */
   const cda = base.cda + (aero ? 0.25 * ((aero.front + aero.rear) / 200) : 0);
-  const vmax = terminalSpeed(race.hp, race.kg, cda);
+  const vmax = terminalSpeed(effHp, effKg, cda);
   const distance = drag ? race.dragDistance : track.straight;
   const entry = drag ? 0 : clamp(70 + 30 * (1 - profile.downforce) + 0.02 * track.straight, 70, 220);
-  const straightSpeed = Math.round(drag ? accelerate(race.hp, race.kg, cda, distance, 0, 1.15) : accelerate(race.hp, race.kg, cda, distance, entry));
+  const straightSpeed = Math.round(drag ? accelerate(effHp, effKg, cda, distance, 0, 1.15) : accelerate(effHp, effKg, cda, distance, entry));
   let topSpeed: number | null = Math.round(Math.min(vmax * 1.03, straightSpeed * 1.05 + 5) / 5) * 5;
   if (car.asp === 'EV') {
     topSpeed = null;
@@ -400,9 +449,57 @@ export function computeSetup(car: Car, track: Track, race: RaceOptions): Setup {
   if (wet && !track.rain) warnings.push('GT7 does not offer rain at this track — the wet setup is shown for reference only.');
   if (drag && !/Route X/.test(track.name)) warnings.push('Drag runs are best done on Special Stage Route X.');
   if (car.cat === 'kart') warnings.push('Racing karts expose very few settings in GT7 — apply the values that are available.');
-  if (car.cat !== 'road' && car.cat !== 'kart') notes.push({ area: 'Regulations', text: 'In Sport Mode / BoP races many of these settings are locked — use this sheet for Custom Races, Lobbies and Time Trials.' });
+  if (locked) warnings.push('Balance of Performance is on: GT7 locks power, weight and most settings. Only brake balance, traction control and fuel map can be changed — those are highlighted below.');
+
+  /* ---------- PP notes */
+  if (ppPlan) {
+    if (ppPlan.delta > 0) {
+      const best = ppPlan.options.find((o) => o.recommended);
+      notes.push({ area: 'PP limit', text: best ? `About ${ppPlan.delta} PP over the ${ppPlan.limit} PP limit. ${best.title} brings it to ≈ ${best.resultPP} PP; the setup below is calculated for the restricted car.` : `About ${ppPlan.delta} PP over the limit — this car may be too fast for the event.` });
+      if (!best) warnings.push(`This car is roughly ${ppPlan.delta} PP over the ${ppPlan.limit} PP limit — more than a restrictor and ballast can remove. Pick a slower car.`);
+    } else {
+      notes.push({ area: 'PP limit', text: `≈ ${ppPlan.current} PP — ${-ppPlan.delta} PP under the ${ppPlan.limit} PP limit. See the PP panel for ways to use that headroom.` });
+    }
+    if (ppPlan.source === 'measured') notes.push({ area: 'Check PP in game', text: `Stock PP on ${TYRE_NAME[tyreRear]} is measured; a wing, aero kit or other parts add PP — confirm on the car settings screen, which updates live.` });
+    else if (ppPlan.source !== 'user') notes.push({ area: 'Check PP in game', text: 'PP is estimated — confirm on the car settings screen (it updates live) and enter the real value on the Event step for an exact plan.' });
+  }
+
+  /* ---------- race strategy */
+  const laps = ev.laps ?? 0;
+  let strategy = laps > 0 && race.type !== 'drag' && race.type !== 'drift' && race.type !== 'time-trial'
+    ? planStrategy({ laps, lengthM: track.length, hp: effHp, tyre: tyreRear, fuelMult: ev.fuelMult ?? 1, wearMult: ev.wearMult ?? 1, ev: car.asp === 'EV' })
+    : null;
+  // A short race with normal wear and fuel needs no plan — just say so.
+  if (strategy && strategy.stops === 0 && (ev.fuelMult ?? 1) <= 1 && (ev.wearMult ?? 1) <= 1) {
+    notes.push({ area: 'Strategy', text: `No pit stop needed for ${laps} ${laps === 1 ? 'lap' : 'laps'} — about ${Math.ceil(strategy.totalFuel)}% of a tank and well within the tyres' life.` });
+    strategy = null;
+  }
+
+  /* ---------- parts to buy */
+  const parts: Setup['parts'] = [];
+  if (!locked) {
+    parts.push({ name: 'Fully Customisable Suspension', why: 'ride height, springs, dampers, anti-roll bars and alignment' });
+    if (lsdFront || lsdRear) parts.push({ name: 'Fully Customisable LSD', why: 'initial torque and locking sensitivities' });
+    if (torqueSplit !== null) parts.push({ name: 'Torque-Vectoring Centre Differential', why: 'front/rear torque distribution' });
+    if (topSpeed) parts.push({ name: 'Fully Customisable Transmission', why: 'top-speed / gear-ratio setting' });
+    if (aero && car.cat === 'road') parts.push({ name: 'Custom rear wing / aero parts', why: 'adjustable downforce (adds PP)' });
+    if (restrictor < 100) parts.push({ name: 'Power Restrictor', why: `set to ${restrictor}% to meet the PP limit` });
+    if (ballast > 0) parts.push({ name: 'Ballast', why: `${ballast} kg at position ${ballastPos > 0 ? '+' : ''}${ballastPos}` });
+    if (tyreFront.startsWith('R') && car.cat === 'road') parts.push({ name: `${TYRE_NAME[tyreFront]} tyres`, why: 'Tyres tab of the Tuning Shop' });
+  }
 
   return {
+    ppEstimate,
+    ppTyre,
+    ppPlan,
+    restrictor,
+    ballast,
+    ballastPos,
+    effHp,
+    effKg,
+    locked,
+    strategy,
+    parts,
     profile,
     tyreFront,
     tyreRear,

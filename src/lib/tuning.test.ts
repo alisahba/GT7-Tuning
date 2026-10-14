@@ -5,7 +5,7 @@ import type { Car, RaceOptions, RaceType, Track } from '../types';
 
 const RACES: RaceType[] = ['time-trial', 'sprint', 'endurance', 'drift', 'drag'];
 const opts = (car: Car, type: RaceType = 'sprint', extra: Partial<RaceOptions> = {}): RaceOptions => ({
-  type, weather: 'dry', style: 0, hp: car.hp, kg: car.kg, dragDistance: 402, ...extra,
+  type, weather: 'dry', style: 0, hp: car.hp, kg: car.kg, dragDistance: 402, event: {}, ...extra,
 });
 
 function expectLegal(s: Setup) {
@@ -82,10 +82,10 @@ describe('computeSetup', () => {
   it('uses rally setups and tyres off-tarmac', () => {
     const car = CAR_BY_ID.get(3232)!; // WRX Gr.B
     const s = computeSetup(car, TRACK_BY_ID.get('795ed4')!, opts(car)); // Fishermans Ranch
-    expect(s.tyreFront).toBe('Dirt');
+    expect(s.tyreFront).toBe('D');
     expect(s.rideHeight.front).toBeGreaterThanOrEqual(45);
     const snow = computeSetup(car, TRACK_BY_ID.get('40e254')!, opts(car));
-    expect(snow.tyreFront).toBe('Snow');
+    expect(snow.tyreFront).toBe('S');
   });
 
   it('runs less downforce at Monza than at Tsukuba', () => {
@@ -102,7 +102,7 @@ describe('computeSetup', () => {
     const dry = computeSetup(car, t, opts(car));
     const wet = computeSetup(car, t, opts(car, 'sprint', { weather: 'wet' }));
     expect(wet.frequency.front).toBeLessThan(dry.frequency.front);
-    expect(wet.tyreFront).toBe('Intermediate');
+    expect(wet.tyreFront).toBe('IM');
     expect(wet.tcs).toBeGreaterThan(dry.tcs);
   });
 
@@ -141,5 +141,96 @@ describe('physics helpers', () => {
     expect(p('f18da2').speedClass).toBe('Technical');
     expect(p('12ceac').bumps).toBeGreaterThan(0.8);
     expect(p('d93f3a').isOval).toBe(true);
+  });
+});
+
+describe('events', () => {
+  it('only references real track layouts', async () => {
+    const { EVENT_SERIES } = await import('./events');
+    for (const s of EVENT_SERIES) for (const r of s.rounds) expect(TRACK_BY_ID.has(r.track), `${s.name} → ${r.track}`).toBe(true);
+  });
+
+  it('checks car eligibility', async () => {
+    const { SERIES_BY_ID, checkEligibility } = await import('./events');
+    const rx7 = CAR_BY_ID.get(205)!;
+    const mustang = CAR_BY_ID.get(2138)!;
+    const gr3 = CAR_BY_ID.get(3224)!;
+    expect(checkEligibility(rx7, SERIES_BY_ID.get('japanese-clubman-cup-550')).ok).toBe(true);
+    expect(checkEligibility(mustang, SERIES_BY_ID.get('japanese-clubman-cup-550')).ok).toBe(false);
+    expect(checkEligibility(mustang, SERIES_BY_ID.get('american-clubman-cup-700')).ok).toBe(true);
+    expect(checkEligibility(rx7, SERIES_BY_ID.get('japanese-4wd-challenge-550')).ok).toBe(false);
+    expect(checkEligibility(gr3, SERIES_BY_ID.get('gt-cup-gr3')).ok).toBe(true);
+    expect(checkEligibility(rx7, SERIES_BY_ID.get('gt-cup-gr3')).ok).toBe(false);
+  });
+
+  it('puts every track in one of the three World Circuits regions', () => {
+    for (const t of TRACKS) expect(['Europe', 'America', 'Asia-Oceania']).toContain(t.region);
+    expect(TRACK_BY_ID.get('6e378b')!.region).toBe('Asia-Oceania'); // Suzuka
+    expect(TRACK_BY_ID.get('3c4be1')!.region).toBe('Europe'); // Spa
+    expect(TRACK_BY_ID.get('6cdd45')!.region).toBe('America'); // Laguna Seca
+  });
+});
+
+describe('performance points', () => {
+  it('uses measured stock PP when available', async () => {
+    const { estimatePP } = await import('./pp');
+    const rx7 = CAR_BY_ID.get(205)!;
+    expect(estimatePP(rx7, rx7.hp, rx7.kg, 'SM')).toEqual({ value: rx7.pp!.SM, source: 'measured' });
+    const tuned = estimatePP(rx7, rx7.hp + 100, rx7.kg, 'SM');
+    expect(tuned.source).toBe('scaled');
+    expect(tuned.value).toBeGreaterThan(rx7.pp!.SM!);
+  });
+
+  it('brings an over-limit car under the limit', async () => {
+    const { planPP } = await import('./pp');
+    for (const [current, limit] of [[620, 600], [700, 600], [560, 550]]) {
+      const plan = planPP({ current, source: 'user', limit, hp: 400, kg: 1300, tyre: 'SM', fixedTyre: false, technical: true });
+      expect(plan.delta).toBe(current - limit);
+      const best = plan.options.find((o) => o.recommended)!;
+      expect(best.resultPP).toBeLessThanOrEqual(limit);
+      expect(plan.restrictor).toBeGreaterThanOrEqual(70);
+      expect(plan.restrictor).toBeLessThanOrEqual(100);
+      expect(plan.ballast).toBeLessThanOrEqual(200);
+    }
+  });
+
+  it('suggests using headroom, but never dry tyres in the wet', async () => {
+    const { planPP } = await import('./pp');
+    const dry = planPP({ current: 500, source: 'user', limit: 600, hp: 300, kg: 1200, tyre: 'SH', fixedTyre: false, technical: false });
+    expect(dry.options.some((o) => o.kind === 'power')).toBe(true);
+    expect(dry.options.some((o) => o.kind === 'tyre')).toBe(true);
+    const wet = planPP({ current: 500, source: 'user', limit: 600, hp: 300, kg: 1200, tyre: 'IM', fixedTyre: false, technical: false });
+    expect(wet.options.some((o) => o.kind === 'tyre')).toBe(false);
+  });
+
+  it('applies the PP plan to the setup', () => {
+    const car = CAR_BY_ID.get(3224)!; // Gr.3, ~680 PP
+    const s = computeSetup(car, TRACK_BY_ID.get('6e378b')!, opts(car, 'sprint', { event: { ppLimit: 600 } }));
+    expect(s.ppPlan!.delta).toBeGreaterThan(0);
+    expect(s.restrictor < 100 || s.ballast > 0).toBe(true);
+    expect(s.effHp).toBeLessThanOrEqual(car.hp);
+  });
+
+  it('honours required tyres and BoP', () => {
+    const car = CAR_BY_ID.get(205)!;
+    const t = TRACK_BY_ID.get('6e378b')!;
+    expect(computeSetup(car, t, opts(car, 'sprint', { event: { tyre: 'CH' } })).tyreFront).toBe('CH');
+    const bop = computeSetup(car, t, opts(car, 'sprint', { event: { bop: true, ppLimit: 400 } }));
+    expect(bop.locked).toBe(true);
+    expect(bop.ppPlan).toBeNull();
+    expect(bop.parts).toHaveLength(0);
+  });
+});
+
+describe('strategy', () => {
+  it('plans stops when fuel or tyres run out', async () => {
+    const { planStrategy } = await import('./strategy');
+    const none = planStrategy({ laps: 3, lengthM: 5000, hp: 300, tyre: 'SM', fuelMult: 1, wearMult: 1, ev: false });
+    expect(none.stops).toBe(0);
+    const long = planStrategy({ laps: 30, lengthM: 7000, hp: 550, tyre: 'RH', fuelMult: 3, wearMult: 5, ev: false });
+    expect(long.stops).toBeGreaterThan(2);
+    expect(long.stints[0].from).toBe(1);
+    expect(long.stints[long.stints.length - 1].to).toBe(30);
+    for (const s of long.stints) expect(s.to - s.from + 1).toBeLessThanOrEqual(Math.min(long.fuelLaps, long.tyreLaps));
   });
 });
