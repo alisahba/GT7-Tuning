@@ -2,17 +2,20 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { RaceOptions } from './types';
 import { CAR_BY_ID, CARS, TRACK_BY_ID, TRACKS } from './lib/data';
 import { DEFAULT_ROUTE, parseHash, toHash, type RouteState, type Step } from './lib/route';
+import { actions, useStore } from './lib/store';
 import { CarPicker } from './components/CarPicker';
 import { TrackPicker } from './components/TrackPicker';
 import { RacePicker } from './components/RacePicker';
 import { SetupSheet } from './components/SetupSheet';
+import { Garage } from './components/Garage';
+import { SettingsMenu } from './components/SettingsMenu';
 import { TrackMap } from './components/TrackMap';
-import { IconCheck } from './components/Icons';
+import { IconCheck, IconGarage } from './components/Icons';
 
-const STEPS: { id: Step; label: string }[] = [
+const STEPS: { id: Exclude<Step, 'garage'>; label: string }[] = [
   { id: 'car', label: 'Car' },
   { id: 'track', label: 'Track' },
-  { id: 'race', label: 'Race' },
+  { id: 'race', label: 'Event' },
   { id: 'setup', label: 'Setup' },
 ];
 const HERO_TRACK = TRACK_BY_ID.get('6e378b') ?? TRACKS[0]; // Suzuka
@@ -26,49 +29,70 @@ function useRoute() {
   }, []);
   const go = useCallback((next: RouteState, replace = false) => {
     const hash = toHash(next);
-    if (hash === location.hash) return setRoute(next);
-    if (replace) history.replaceState(null, '', hash);
-    else history.pushState(null, '', hash);
+    if (hash !== location.hash) {
+      if (replace) history.replaceState(null, '', hash);
+      else history.pushState(null, '', hash);
+    }
     setRoute(next);
   }, []);
   return [route, go] as const;
 }
 
+function useTheme() {
+  const theme = useStore((s) => s.settings.theme);
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'system') root.removeAttribute('data-theme');
+    else root.setAttribute('data-theme', theme);
+  }, [theme]);
+}
+
 export default function App() {
+  useTheme();
   const [route, go] = useRoute();
+  const savedCount = useStore((s) => s.saved.length);
   const car = route.car !== undefined ? CAR_BY_ID.get(route.car) : undefined;
   const track = route.track ? TRACK_BY_ID.get(route.track) : undefined;
 
   // Never land on a step whose prerequisites are missing (e.g. a stale link).
-  const step: Step = !car ? 'car' : route.step === 'car' ? 'car' : !track ? 'track' : route.step;
+  const step: Step =
+    route.step === 'garage' ? 'garage' : !car ? 'car' : route.step === 'car' ? 'car' : !track ? 'track' : route.step;
 
   useEffect(() => {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0 });
   }, [step]);
 
   const race: RaceOptions | null = useMemo(
     () =>
       car
-        ? { type: route.race, weather: route.weather, style: route.style, hp: route.hp ?? car.hp, kg: route.kg ?? car.kg, dragDistance: route.drag }
+        ? {
+            type: route.race,
+            weather: route.weather,
+            style: route.style,
+            hp: route.hp ?? car.hp,
+            kg: route.kg ?? car.kg,
+            dragDistance: route.drag,
+            event: route.event,
+          }
         : null,
-    [car, route.race, route.weather, route.style, route.hp, route.kg, route.drag],
+    [car, route.race, route.weather, route.style, route.hp, route.kg, route.drag, route.event],
   );
 
   const reachable = (s: Step) => s === 'car' || (s === 'track' && !!car) || ((s === 'race' || s === 'setup') && !!car && !!track);
+  const stepIndex = STEPS.findIndex((x) => x.id === step);
 
   return (
     <div className="app">
       <header className="topbar">
         <a className="brand" href="#/" onClick={(e) => { e.preventDefault(); go(DEFAULT_ROUTE); }}>
-          <span className="brand-mark">
-            <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M10 44 Q20 16 34 22 T54 18" /><circle cx="10" cy="44" r="5" /></svg>
+          <span className="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32"><path d="M5 22c3-9 8-13 13-11s5 7 9 5" /><circle cx="5" cy="22" r="2.4" /></svg>
           </span>
-          <span className="brand-text">GT7 <b>Tuning Lab</b></span>
+          <span className="brand-text">GT7 <em>Tuning Lab</em></span>
         </a>
         <nav className="stepper" aria-label="Progress">
           {STEPS.map((s, i) => {
-            const idx = STEPS.findIndex((x) => x.id === step);
-            const done = i < idx;
+            const done = stepIndex > i;
             return (
               <button
                 key={s.id}
@@ -84,53 +108,70 @@ export default function App() {
             );
           })}
         </nav>
+        <div className="top-actions">
+          <button
+            type="button"
+            className={`icon-btn ${step === 'garage' ? 'on' : ''}`}
+            onClick={() => go({ ...route, step: step === 'garage' ? (car ? (track ? 'race' : 'track') : 'car') : 'garage' })}
+            aria-label="My garage"
+            title="My garage — saved setups & favourites"
+          >
+            <IconGarage />
+            <span className="icon-btn-label">Garage</span>
+            {savedCount > 0 && <span className="badge">{savedCount}</span>}
+          </button>
+          <SettingsMenu />
+        </div>
       </header>
 
       {step === 'car' && (
-        <div className="hero">
+        <section className="hero">
           <div className="hero-copy">
-            <p className="eyebrow">Gran Turismo 7 · PlayStation 5</p>
-            <h1>Dial in the <span>perfect tune</span>.</h1>
-            <p>Pick any of {CARS.length} cars, choose one of {TRACKS.length} track layouts and the race you're entering. Get a complete, ready-to-enter setup — suspension, differential, aero, gearing and brakes.</p>
+            <p className="eyebrow">Gran Turismo 7 · Setup companion</p>
+            <h1>The right setup for every car, circuit and event.</h1>
+            <p className="lede">
+              Choose from {CARS.length} cars and {TRACKS.length} layouts, add the event's regulations and PP limit, and get a complete
+              sheet — suspension, differential, aero, gearing, brakes, PP adjustment and pit strategy.
+            </p>
           </div>
           <div className="hero-map" aria-hidden="true">
-            <TrackMap track={HERO_TRACK} animate strokeWidth={16} />
+            <TrackMap track={HERO_TRACK} animate strokeWidth={12} />
+            <span className="hero-map-caption">Suzuka Circuit · traced from an in-game lap</span>
           </div>
-        </div>
+        </section>
       )}
 
       <main className="main">
+        {step === 'garage' && (
+          <Garage
+            onOpen={(hash) => go(parseHash(hash))}
+            onPickCar={(id) => go({ ...route, car: id, hp: undefined, kg: undefined, step: track ? 'race' : 'track' })}
+          />
+        )}
         {step === 'car' && (
           <CarPicker
             selected={car?.id}
-            onPick={(c) => go({ ...route, car: c.id, hp: undefined, kg: undefined, step: track ? 'race' : 'track' })}
+            onPick={(c) => {
+              actions.pushRecent(c.id);
+              go({ ...route, car: c.id, hp: undefined, kg: undefined, event: { ...route.event, currentPP: undefined }, step: track ? 'race' : 'track' });
+            }}
           />
         )}
         {step === 'track' && car && (
-          <>
-            <SelectionBar carName={`${car.maker} ${car.name}`} onChange={() => go({ ...route, step: 'car' })} />
-            <TrackPicker selected={track?.id} onPick={(t) => go({ ...route, track: t.id, step: 'race' })} />
-          </>
+          <TrackPicker
+            car={car}
+            selected={track?.id}
+            onChangeCar={() => go({ ...route, step: 'car' })}
+            onPick={(t) => go({ ...route, track: t.id, step: 'race' })}
+          />
         )}
         {step === 'race' && car && track && race && (
           <RacePicker
             car={car}
             track={track}
-            value={{ race: route.race, weather: route.weather, style: route.style, hp: race.hp, kg: race.kg, drag: route.drag }}
-            onChange={(p) =>
-              go(
-                {
-                  ...route,
-                  race: p.race ?? route.race,
-                  weather: p.weather ?? route.weather,
-                  style: p.style ?? route.style,
-                  hp: p.hp !== undefined ? (p.hp === car.hp ? undefined : p.hp) : route.hp,
-                  kg: p.kg !== undefined ? (p.kg === car.kg ? undefined : p.kg) : route.kg,
-                  drag: p.drag ?? route.drag,
-                },
-                true,
-              )
-            }
+            route={route}
+            race={race}
+            onChange={(next) => go(next, true)}
             onSubmit={() => go({ ...route, step: 'setup' })}
             onChangeCar={() => go({ ...route, step: 'car' })}
             onChangeTrack={() => go({ ...route, step: 'track' })}
@@ -149,20 +190,12 @@ export default function App() {
 
       <footer className="footer">
         <p>
-          Fan-made tool, not affiliated with Sony Interactive Entertainment or Polyphony Digital. “Gran Turismo” is a registered trademark of SIE.
-          Car list: <a href="https://github.com/ddm999/gt7info" target="_blank" rel="noreferrer">gt7info</a> · Track maps: <a href="https://github.com/jbhoorasingh/gt7-datalogger-track-data" target="_blank" rel="noreferrer">gt7-datalogger-track-data</a> &amp; <a href="https://github.com/zetetos/gt-telemetry" target="_blank" rel="noreferrer">gt-telemetry</a> · Fallback photos: Wikipedia / Wikimedia Commons.
+          A fan-made companion for Gran Turismo 7. Not affiliated with Sony Interactive Entertainment or Polyphony Digital; “Gran Turismo” is a
+          registered trademark of SIE. Car data and stock PP: <a href="https://github.com/ddm999/gt7info" target="_blank" rel="noreferrer">gt7info</a>.
+          Track maps: <a href="https://github.com/jbhoorasingh/gt7-datalogger-track-data" target="_blank" rel="noreferrer">gt7-datalogger-track-data</a> and{' '}
+          <a href="https://github.com/zetetos/gt-telemetry" target="_blank" rel="noreferrer">gt-telemetry</a>. Fallback photos: Wikipedia / Wikimedia Commons.
         </p>
       </footer>
-    </div>
-  );
-}
-
-function SelectionBar({ carName, onChange }: { carName: string; onChange: () => void }) {
-  return (
-    <div className="selection-bar">
-      <span>Tuning for</span>
-      <strong>{carName}</strong>
-      <button type="button" className="link-btn" onClick={onChange}>Change</button>
     </div>
   );
 }

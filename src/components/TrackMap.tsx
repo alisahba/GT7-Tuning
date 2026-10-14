@@ -7,27 +7,20 @@ interface Props {
   strokeWidth?: number;
 }
 
-export function TrackMap({ track, className = '', animate = false, strokeWidth = 22 }: Props) {
+export function TrackMap({ track, className = '', animate = false, strokeWidth = 18 }: Props) {
   const m = track.map;
   if (!m) return <div className={`track-map empty ${className}`} />;
-  const pad = 60;
+  const pad = 50;
   const vb = `${-pad} ${-pad} ${m.w + pad * 2} ${m.h + pad * 2}`;
-  const gid = `tg-${track.id}`;
   const [sx, sy] = m.start;
+  const sw = strokeWidth;
   return (
     <svg className={`track-map ${animate ? 'animate' : ''} ${className}`} viewBox={vb} role="img" aria-label={`${track.name} layout`}>
-      <defs>
-        <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="var(--map-a)" />
-          <stop offset="1" stopColor="var(--map-b)" />
-        </linearGradient>
-      </defs>
-      <path d={m.d} className="tm-casing" strokeWidth={strokeWidth * 2.2} />
-      <path d={m.d} className="tm-glow" stroke={`url(#${gid})`} strokeWidth={strokeWidth * 1.6} />
-      <path d={m.d} className="tm-line" stroke={`url(#${gid})`} strokeWidth={strokeWidth} pathLength={1} />
+      <path d={m.d} className="tm-casing" strokeWidth={sw * 2.4} />
+      <path d={m.d} className="tm-line" strokeWidth={sw} pathLength={1} />
       <g transform={`translate(${sx} ${sy}) rotate(${m.dir})`} className="tm-start">
-        <rect x={-6} y={-strokeWidth * 1.4} width={12} height={strokeWidth * 2.8} rx={3} />
-        <path d={`M${strokeWidth * 1.6} ${-strokeWidth * 0.9} L${strokeWidth * 3.1} 0 L${strokeWidth * 1.6} ${strokeWidth * 0.9}`} className="tm-arrow" strokeWidth={strokeWidth * 0.5} />
+        <rect x={-sw * 0.35} y={-sw * 1.5} width={sw * 0.7} height={sw * 3} rx={sw * 0.2} />
+        <path d={`M${sw * 1.7} ${-sw * 0.85} L${sw * 3} 0 L${sw * 1.7} ${sw * 0.85}`} className="tm-arrow" strokeWidth={sw * 0.45} />
       </g>
     </svg>
   );
